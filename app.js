@@ -173,7 +173,7 @@
         if (!s.r) s.r = row.querySelector('[data-f=r]').placeholder.replace(/\D/g, '') || '';
         if (!s.w && !ex.bodyweight) { const ph = row.querySelector('[data-f=w]').placeholder; if (/^\d/.test(ph)) s.w = ph; }
         if (!s.done && !s.r) { row.querySelector('[data-f=r]').focus(); return toast('Enter your reps'); }
-        s.done = !s.done; save(); render();
+        s.done = !s.done; s.at = s.done ? Date.now() : undefined; save(); render();
         if (s.done) startTimer(ex.rest || 90);
         return;
       }
@@ -183,7 +183,7 @@
       if (e.target.closest('#finish')) {
         const done = d.exercises.reduce((n, x) => n + x.sets.filter(s => s.done).length, 0);
         if (!done) return toast('Log at least one set first');
-        store.sessions.push({ ...d, duration: Date.now() - d.date }); store.draft = null; save();
+        store.sessions.push({ ...d, end: Date.now(), duration: activeMs({ ...d, end: Date.now() }) }); store.draft = null; save();
         $('#timerSkip').click(); toast('Workout saved'); stack.length = 0; return go({ name: 'history' }, false);
       }
       if (e.target.closest('#discard')) {
@@ -193,15 +193,54 @@
     };
   }
 
+  // Workout time: start to finish, but if the session was left open, stop counting
+  // 10 minutes after the last checked set. Never more than 3 hours.
+  const CAP = 3 * 3600e3, TAIL = 10 * 60e3;
+  function activeMs(s) {
+    const start = s.date, end = s.end || (s.date + (s.duration || 0));
+    const stamps = s.exercises.flatMap(x => x.sets.filter(y => y.done && y.at).map(y => y.at));
+    let stop = end;
+    if (stamps.length) stop = Math.min(end, Math.max(...stamps) + TAIL);
+    return Math.max(0, Math.min(CAP, stop - start));
+  }
+  const mins = ms => Math.round(ms / 60000);
+  const fmtDur = ms => { const m = mins(ms); return m >= 60 ? `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m` : `${m}m`; };
+  const weekStart = t => { const d = new Date(t); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return d.getTime(); };
+  function weekStreak(list) {
+    if (!list.length) return 0;
+    const weeks = new Set(list.map(s => weekStart(s.date)));
+    let w = weekStart(Date.now()); if (!weeks.has(w)) w -= 7 * 864e5;
+    let n = 0; while (weeks.has(w)) { n++; w = weekStart(w - 3 * 864e5); }
+    return n;
+  }
+  function statsPanel() {
+    const L = store.sessions, now = new Date();
+    const durs = L.map(activeMs), total = durs.reduce((a, b) => a + b, 0);
+    const wk = weekStart(Date.now()), mo = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+    const sum = f => L.reduce((a, s, i) => a + (f(s) ? durs[i] : 0), 0);
+    const cnt = f => L.filter(f).length;
+    const streak = weekStreak(L);
+    return `<div class="card stats">
+      <div class="top"><div><div class="eyebrow">Total training time</div><div class="big" style="font-size:38px;margin-top:4px">${fmtDur(total)}</div></div>
+        <div style="text-align:right"><div class="big">${L.length}</div><div class="muted small">workouts</div></div></div>
+      <div class="stat-grid">
+        <div class="stat"><b>${fmtDur(sum(s => s.date >= wk))}</b><span>this week · ${cnt(s => s.date >= wk)}</span></div>
+        <div class="stat"><b>${fmtDur(sum(s => s.date >= mo))}</b><span>this month · ${cnt(s => s.date >= mo)}</span></div>
+        <div class="stat"><b>${L.length ? fmtDur(total / L.length) : '0m'}</b><span>avg workout</span></div>
+      </div>
+      <div class="muted small" style="margin-top:10px">${streak ? `${streak}-week streak. Keep it going.` : 'Log a workout this week to start a streak.'}</div>
+    </div>`;
+  }
+
   const volume = s => s.exercises.reduce((v, x) => v + x.sets.filter(y => y.done).reduce((a, y) => a + (+y.w || 0) * (+y.r || 0), 0), 0);
 
   function history() {
     const list = [...store.sessions].reverse();
-    view.innerHTML = `<div class="eyebrow" style="margin:6px 0 12px">History</div>` + (list.length ? list.map(s => {
+    view.innerHTML = `<div class="eyebrow" style="margin:6px 0 12px">History</div>` + statsPanel() + (list.length ? list.map(s => {
       const sets = s.exercises.reduce((n, x) => n + x.sets.filter(y => y.done).length, 0);
       return `<div class="card"><div class="top"><div><b>${esc(s.title)}</b><div class="muted small">${fmtDate(s.date)}</div></div>
         <div class="big">${Math.round(volume(s)).toLocaleString()}<span class="muted small"> ${store.unit}</span></div></div>
-        <div class="stat-grid"><div class="stat"><b>${sets}</b><span>sets</span></div><div class="stat"><b>${s.exercises.filter(x => x.sets.some(y => y.done)).length}</b><span>exercises</span></div><div class="stat"><b>${Math.max(1, Math.round((s.duration || 0) / 60000))}</b><span>minutes</span></div></div>
+        <div class="stat-grid"><div class="stat"><b>${sets}</b><span>sets</span></div><div class="stat"><b>${s.exercises.filter(x => x.sets.some(y => y.done)).length}</b><span>exercises</span></div><div class="stat"><b>${fmtDur(Math.max(60000, activeMs(s)))}</b><span>time</span></div></div>
         <div class="muted small" style="margin-top:10px;line-height:1.6">${s.exercises.filter(x => x.sets.some(y => y.done)).map(x => `${esc(x.name)}: ${x.sets.filter(y => y.done).map(y => `${esc(y.w || 'BW')}×${esc(y.r)}`).join(', ')}`).join('<br>')}</div></div>`;
     }).join('') : `<div class="empty">No workouts logged yet.<br>Start Chest Day to see it here.</div>`);
     view.onclick = null;
